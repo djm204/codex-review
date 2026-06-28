@@ -13,7 +13,6 @@
       "name": "codex-review",
       "source": "./",
       "description": "Reusable GitHub Codex (@codex) review-loop skill.",
-      "version": "0.1.0",
       "category": "workflow",
       "keywords": ["codex", "code-review", "github", "pull-request", "automation"]
     }
