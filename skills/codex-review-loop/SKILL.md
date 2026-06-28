@@ -51,11 +51,18 @@ digraph codex_loop {
 
 ## Quick reference
 
-| Step | Command (script colocated in this skill dir) |
-|------|----------------------------------------------|
-| Detect | `codex-review-loop.sh detect --repo OWNER/NAME` |
-| Trigger | `TS=$(codex-review-loop.sh trigger --repo OWNER/NAME --pr N)` |
-| Poll | `codex-review-loop.sh poll --repo OWNER/NAME --pr N --since "$TS"` |
+The script ships with this skill. Reference it via the plugin root so it works whether the
+skill is invoked directly or as a dependency of another plugin:
+
+```bash
+SCRIPT="${CLAUDE_PLUGIN_ROOT}/skills/codex-review-loop/codex-review-loop.sh"
+```
+
+| Step | Command |
+|------|---------|
+| Detect | `"$SCRIPT" detect --repo OWNER/NAME` |
+| Trigger | `TS=$("$SCRIPT" trigger --repo OWNER/NAME --pr N)` |
+| Poll | `"$SCRIPT" poll --repo OWNER/NAME --pr N --since "$TS"` |
 | Reply (inline) | `gh api repos/OWNER/NAME/pulls/N/comments/ID/replies -f body=...` |
 | Resolve thread | GraphQL `resolveReviewThread` (map comment→thread first) |
 
@@ -64,8 +71,8 @@ decide empirically"** — never skip the loop on inconclusive detection; only de
 unavailable if the full normal review window (~2–6 min / all poll rounds) elapses with no
 Codex response. `poll` returns `{status: clean|findings|working, respondedAt, findings[]}`.
 
-See `codex-review-loop.sh --help` for the full interface; the pure `classify` and
-`detect-classify` actions accept `--input` for offline testing.
+See `"$SCRIPT" --help` for the full interface; the pure `classify` and `detect-classify`
+actions accept `--input` for offline testing.
 
 ## Addressing findings (judgement)
 
