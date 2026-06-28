@@ -1,0 +1,6 @@
+{
+  "botSlug": "chatgpt-codex-connector",
+  "installations": [
+    { "app_slug": "chatgpt-codex-connector", "repository_selection": "selected", "repoIncluded": true }
+  ]
+}

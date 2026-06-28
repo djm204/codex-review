@@ -1,0 +1,7 @@
+{
+  "botSlug": "chatgpt-codex-connector",
+  "owner": "djm204",
+  "installations": [
+    { "app_slug": "chatgpt-codex-connector", "repository_selection": "all", "account": { "login": "djm204" }, "suspended_at": "2026-06-01T00:00:00Z" }
+  ]
+}

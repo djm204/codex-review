@@ -1,0 +1,20 @@
+{
+  "name": "codex-review",
+  "owner": {
+    "name": "David Mendez",
+    "url": "https://github.com/djm204"
+  },
+  "metadata": {
+    "description": "Marketplace for the codex-review plugin.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "codex-review",
+      "source": "./",
+      "description": "Reusable GitHub Codex (@codex) review-loop skill.",
+      "category": "workflow",
+      "keywords": ["codex", "code-review", "github", "pull-request", "automation"]
+    }
+  ]
+}
