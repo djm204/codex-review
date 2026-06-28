@@ -256,8 +256,11 @@ case "$ACTION" in
     ic="$(fetch "repos/$REPO/issues/$PR/comments")"
     rv="$(fetch "repos/$REPO/pulls/$PR/reviews")"
     il="$(fetch "repos/$REPO/pulls/$PR/comments")"
-    jq -n --argjson ic "$ic" --argjson rv "$rv" --argjson il "$il" --arg since "$SINCE" \
-      '{since:$since, issueComments:$ic, reviews:$rv, inlineComments:$il}' \
+    # Combine via stdin (jq -s), NOT --argjson: a busy PR's paginated channels can exceed
+    # ARG_MAX and a command-line --argjson would fail with "Argument list too long".
+    printf '%s\n%s\n%s\n' "$ic" "$rv" "$il" \
+      | jq -s --arg since "$SINCE" \
+          '{since:$since, issueComments:.[0], reviews:.[1], inlineComments:.[2]}' \
       | classify_json
     ;;
 

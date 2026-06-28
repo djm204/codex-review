@@ -92,8 +92,11 @@ its thread node id, then `resolveReviewThread(input:{threadId})`.
 - **Three channels.** Poll all of: `issues/{pr}/comments` (top-level), `pulls/{pr}/reviews`,
   `pulls/{pr}/comments` (inline). Findings arrive as reviews + inline comments.
 - **The clean signal is a top-level issue comment**, not silence and not an empty review:
-  body matches *"Didn't find any major issues"* (also "no issues" / "looks good" / 👍).
-  Watching only inline comments treats "finished, found nothing" as "still working" → hangs.
+  body matches *"Didn't find any major issues"* (also "no issues" / "looks good" /
+  "no suggestions"). Watching only inline comments treats "finished, found nothing" as
+  "still working" → hangs. (A bare 👍 *reaction* with no comment is **not** auto-detected by
+  the script — Codex posts the text comment in practice; if you only ever see a reaction,
+  confirm clean manually.)
 - **A clean issue-comment is terminal** — stop the loop; don't run more rounds in the batch.
 - **Bot login** is `chatgpt-codex-connector`; tolerate the `[bot]` suffix when matching.
 - **`detect` is best-effort & positive-only.** App-install listing needs an App-authorized
