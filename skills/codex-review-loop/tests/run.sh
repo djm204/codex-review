@@ -21,6 +21,9 @@ assert_eq "finding count (2 inline + 1 review)" "3" "$(bash "$CODEX" classify --
 assert_eq "no new bot activity => working" "working" "$(bash "$CODEX" classify --input "$FIX/codex-working.json" | jq -r .status)"
 assert_eq "clean signal wins over stale inline" "clean" "$(bash "$CODEX" classify --input "$FIX/codex-clean-wins.json" | jq -r .status)"
 assert_eq "classify reads stdin"     "clean"    "$(bash "$CODEX" classify < "$FIX/codex-clean.json" | jq -r .status)"
+assert_eq "Codex review banner is not a finding" "working" "$(bash "$CODEX" classify --input "$FIX/codex-banner-only.json" | jq -r .status)"
+assert_eq "banner-only => zero findings" "0" "$(bash "$CODEX" classify --input "$FIX/codex-banner-only.json" | jq -r '.findings|length')"
+assert_eq "bare 'looks good / no issues' is clean" "clean" "$(bash "$CODEX" classify --input "$FIX/codex-clean-looksgood.json" | jq -r .status)"
 
 echo "codex-review-loop.sh detect-classify (app list)"
 assert_eq "codex installed for all repos => available"  "true"  "$(bash "$CODEX" detect-classify --input "$FIX/apps-with-codex.json" | jq -r .available)"

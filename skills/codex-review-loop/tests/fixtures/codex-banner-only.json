@@ -1,0 +1,14 @@
+{
+  "since": "2026-06-27T10:00:00Z",
+  "botLogin": "chatgpt-codex-connector",
+  "issueComments": [],
+  "reviews": [
+    {
+      "user": { "login": "chatgpt-codex-connector[bot]" },
+      "submitted_at": "2026-06-27T10:06:00Z",
+      "state": "COMMENTED",
+      "body": "### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\nReviewed commit: abc123"
+    }
+  ],
+  "inlineComments": []
+}

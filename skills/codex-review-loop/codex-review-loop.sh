@@ -60,7 +60,9 @@ set -euo pipefail
 
 DEFAULT_BOT="chatgpt-codex-connector"
 # Terminal "clean pass" signals — Codex posts a top-level issue comment on no findings.
-CLEAN_REGEX="didn't find any major issues|did not find any major issues|no major issues|no issues found|no actionable findings|looks good to me|no suggestions"
+CLEAN_REGEX="didn't find any major issues|did not find any major issues|no major issues|no issues|no actionable findings|looks good|no suggestions"
+# The non-actionable "💡 Codex Review" wrapper review Codex posts around its findings.
+BANNER_REGEX="here are some automated review suggestions|💡 codex review"
 
 die() { echo "codex-review-loop.sh: $*" >&2; exit 2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
@@ -68,7 +70,7 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 # ---- pure classifier (shared by `classify` and `poll`) ----------------------
 # Reads the channels JSON on stdin, writes classification JSON to stdout.
 classify_json() {
-  jq --arg cleanre "$CLEAN_REGEX" --arg defbot "$DEFAULT_BOT" '
+  jq --arg cleanre "$CLEAN_REGEX" --arg bannerre "$BANNER_REGEX" --arg defbot "$DEFAULT_BOT" '
     (.botLogin // $defbot)              as $bot
     | (.since // "")                    as $since
     # normalize a login like "chatgpt-codex-connector[bot]" -> base name
@@ -83,8 +85,11 @@ classify_json() {
     # clean if any bot issue-comment matches a terminal clean signal
     | ([ $ic[] | select((.body // "") | ascii_downcase | test($cleanre)) ]) as $clean
 
+    # Inline comments are findings; review bodies are findings too, EXCEPT the
+    # non-actionable "💡 Codex Review" wrapper banner, which carries no actionable content.
     | ([ $il[] | {source:"inline", path:(.path//null), line:(.line//null), id:(.id//null), body:(.body//"")} ]
-        + [ $rv[] | select((.state//"") != "APPROVED" and (.body//"") != "")
+        + [ $rv[] | select((.state//"") != "APPROVED" and (.body//"") != ""
+                            and (((.body // "") | ascii_downcase | test($bannerre)) | not))
               | {source:"review", path:null, line:null, id:(.id//null), body:(.body//"")} ]) as $findings
 
     | ([ $ic[].created_at, $rv[].submitted_at, $il[].created_at ] | map(select(. != null)) | sort | last) as $respondedAt
@@ -222,18 +227,35 @@ case "$ACTION" in
     need gh
     [ -n "$REPO" ] || die "trigger needs --repo"
     [ -n "$PR" ]   || die "trigger needs --pr"
-    gh pr comment "$PR" --repo "$REPO" --body "@codex review" >/dev/null
-    # trigger time from the server's clock (avoids local/remote skew)
-    gh api "repos/$REPO" --jq 'now | todate' 2>/dev/null || gh api /octocat --jq 'now | todate'
+    # Post the comment via the API and use the *server's* created_at as the trigger
+    # boundary — avoids client/server clock skew that a local `now` would introduce.
+    ts="$(gh api "repos/$REPO/issues/$PR/comments" -f body="@codex review" \
+            --jq '.created_at' 2>/dev/null)" \
+      || die "trigger: failed to post @codex review comment on $REPO#$PR"
+    [ -n "$ts" ] || die "trigger: GitHub did not return a created_at timestamp"
+    echo "$ts"
     ;;
 
   poll)
     need gh
-    [ -n "$REPO" ] || die "poll needs --repo"
-    [ -n "$PR" ]   || die "poll needs --pr"
-    ic="$(gh api "repos/$REPO/issues/$PR/comments?per_page=100" 2>/dev/null || echo '[]')"
-    rv="$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100"   2>/dev/null || echo '[]')"
-    il="$(gh api "repos/$REPO/pulls/$PR/comments?per_page=100"  2>/dev/null || echo '[]')"
+    [ -n "$REPO" ]  || die "poll needs --repo"
+    [ -n "$PR" ]    || die "poll needs --pr"
+    # Require --since: without a boundary, classify would match *all* historical bot
+    # activity and resurface findings from earlier rounds as if they were new.
+    [ -n "$SINCE" ] || die "poll needs --since (the trigger timestamp from \`trigger\`)"
+
+    # Paginate every channel; a PR with >100 comments/reviews would otherwise hide the
+    # latest Codex activity past page 1. Fail loudly on API error rather than silently
+    # treating it as "no activity" (which would hang the loop or fake a clean pass).
+    fetch() {  # $1 = endpoint path
+      local out
+      out="$(gh api --paginate "$1" --jq '.[]' 2>/dev/null)" \
+        || die "poll: GitHub API request failed: $1"
+      printf '%s' "$out" | jq -s '.'
+    }
+    ic="$(fetch "repos/$REPO/issues/$PR/comments")"
+    rv="$(fetch "repos/$REPO/pulls/$PR/reviews")"
+    il="$(fetch "repos/$REPO/pulls/$PR/comments")"
     jq -n --argjson ic "$ic" --argjson rv "$rv" --argjson il "$il" --arg since "$SINCE" \
       '{since:$since, issueComments:$ic, reviews:$rv, inlineComments:$il}' \
       | classify_json
