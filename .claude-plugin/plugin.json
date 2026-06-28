@@ -1,0 +1,13 @@
+{
+  "name": "codex-review",
+  "version": "0.1.0",
+  "description": "Reusable GitHub Codex (@codex) review-loop skill: trigger a review, poll all three channels, address findings, resolve threads, repeat until clean.",
+  "author": {
+    "name": "David Mendez",
+    "url": "https://github.com/djm204"
+  },
+  "homepage": "https://github.com/djm204/codex-review",
+  "repository": "https://github.com/djm204/codex-review",
+  "license": "MIT",
+  "keywords": ["codex", "code-review", "github", "pull-request", "automation", "skill"]
+}

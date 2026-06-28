@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+#
+# codex-review-loop.sh — drive the GitHub Codex (@codex) review loop on a PR.
+#
+# The mechanical half of the codex review loop (see docs/adr/003-codex-review-loop.md):
+# detect the connector, trigger a review, poll the three GitHub channels Codex uses, and
+# classify the outcome as clean / findings / working. The judgement half (is a finding a
+# real issue, how to fix it) stays with the calling agent.
+#
+# Actions:
+#   detect   --repo OWNER/NAME
+#       Print {"available": true|false|"unknown", "via": "<source>"} for the Codex
+#       connector. Resolution order:
+#         1. installed GitHub Apps that actually cover THIS repo (authoritative-positive).
+#            Account-wide install lists are paginated (--paginate) and may include apps
+#            scoped to *other* repos; a "selected" installation only counts after its
+#            repository list confirms OWNER/NAME. Only an affirmative verdict is trusted
+#            here — a non-match falls through (the visible page/scope may be incomplete).
+#         2. prior connector activity in the repo (positive-only signal) => true.
+#         3. otherwise "unknown" — availability can't be proven (e.g. fresh repo with a
+#            non-App token), so the caller should trigger a review and decide empirically
+#            (no response within the *normal* review window => treat as unavailable).
+#       Never returns a false negative on a fresh repo: absence of evidence is "unknown".
+#
+#   detect-classify --input FILE   (or stdin)   [pure, no network]
+#       Classify installed-apps JSON. Reads
+#       {"installations":[{app_slug|slug, account:{login}?, repository_selection?,
+#         repoIncluded?, suspended_at?}], "botSlug":"...", "owner":"OWNER"?}
+#       and prints {"available":bool, "via":"app-list"}. An installation counts only if its
+#       slug is the bot, it is not suspended, AND it covers this repo: "all" with
+#       account.login == owner (when owner given), or "selected" with repoIncluded==true.
+#
+#   trigger  --repo OWNER/NAME --pr N
+#       Post an "@codex review" comment on PR N. Prints the trigger time (ISO8601 UTC).
+#
+#   poll     --repo OWNER/NAME --pr N --since ISO8601
+#       Fetch the three channels and classify bot activity newer than --since.
+#       Prints the classification JSON (see "classify" for the shape).
+#
+#   classify --input FILE   (or stdin)
+#       Pure classifier — no network. Reads a JSON object:
+#         {
+#           "since":          "<ISO8601>",                 # trigger time
+#           "botLogin":       "chatgpt-codex-connector",   # optional, default as shown
+#           "issueComments":  [ {user:{login}, created_at, body}, ... ],
+#           "reviews":        [ {user:{login}, submitted_at, state, body}, ... ],
+#           "inlineComments": [ {user:{login}, created_at, body, path, line, id}, ... ]
+#         }
+#       Prints:
+#         {
+#           "status":   "clean" | "findings" | "working",
+#           "respondedAt": "<ISO8601 or null>",
+#           "findings": [ {source, path, line, id, body}, ... ]
+#         }
+#       Codex's "[bot]" suffix on user.login is tolerated.
+#
+# Exit codes: 0 ok, 2 usage error.
+#
+set -euo pipefail
+
+DEFAULT_BOT="chatgpt-codex-connector"
+# Terminal "clean pass" signals — Codex posts a top-level issue comment on no findings.
+CLEAN_REGEX="didn't find any major issues|did not find any major issues|no major issues|no issues found|no actionable findings|looks good to me|no suggestions"
+
+die() { echo "codex-review-loop.sh: $*" >&2; exit 2; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
+
+# ---- pure classifier (shared by `classify` and `poll`) ----------------------
+# Reads the channels JSON on stdin, writes classification JSON to stdout.
+classify_json() {
+  jq --arg cleanre "$CLEAN_REGEX" --arg defbot "$DEFAULT_BOT" '
+    (.botLogin // $defbot)              as $bot
+    | (.since // "")                    as $since
+    # normalize a login like "chatgpt-codex-connector[bot]" -> base name
+    | def base($l): ($l // "" | sub("\\[bot\\]$"; ""));
+      def fromBot($u): (base($u.login) == $bot);
+      def newer($ts): ($since == "" or (($ts // "") > $since));
+
+      ([ .issueComments[]?  | select(fromBot(.user) and newer(.created_at)) ]) as $ic
+    | ([ .reviews[]?        | select(fromBot(.user) and newer(.submitted_at))]) as $rv
+    | ([ .inlineComments[]? | select(fromBot(.user) and newer(.created_at)) ]) as $il
+
+    # clean if any bot issue-comment matches a terminal clean signal
+    | ([ $ic[] | select((.body // "") | ascii_downcase | test($cleanre)) ]) as $clean
+
+    | ([ $il[] | {source:"inline", path:(.path//null), line:(.line//null), id:(.id//null), body:(.body//"")} ]
+        + [ $rv[] | select((.state//"") != "APPROVED" and (.body//"") != "")
+              | {source:"review", path:null, line:null, id:(.id//null), body:(.body//"")} ]) as $findings
+
+    | ([ $ic[].created_at, $rv[].submitted_at, $il[].created_at ] | map(select(. != null)) | sort | last) as $respondedAt
+
+    | if ($clean | length) > 0 then
+        {status:"clean",    respondedAt:$respondedAt, findings:[]}
+      elif ($findings | length) > 0 then
+        {status:"findings", respondedAt:$respondedAt, findings:$findings}
+      else
+        {status:"working",  respondedAt:($respondedAt // null), findings:[]}
+      end
+  '
+}
+
+# ---- pure app-list classifier (shared by `detect` and `detect-classify`) ----
+# Reads {installations:[...], botSlug, owner?} on stdin -> {available, via}.
+# An installation counts only when ALL hold:
+#   - slug == bot
+#   - it is active (suspended_at is null/absent)
+#   - it actually covers THIS repo:
+#       repository_selection == "all"  AND  (no owner given OR account.login == owner), or
+#       repository_selection == "selected" with repoIncluded == true (repo-scoped already).
+# The account check stops an "all" install on a *different* account the caller can see from
+# masquerading as coverage of this repo. The network layer computes repoIncluded.
+detect_classify_json() {
+  jq --arg defbot "$DEFAULT_BOT" '
+    (.botSlug // $defbot)              as $slug
+    | (.owner // "" | ascii_downcase)  as $owner
+    | ([ .installations[]?
+         | select((.app_slug // .slug // "") == $slug)
+         | select((.suspended_at // null) == null)
+         | (.repository_selection // "all") as $sel
+         | (($sel == "all") and ($owner == "" or ((.account.login // "" | ascii_downcase) == $owner)))
+           or (.repoIncluded == true) ]) as $covers
+    | { available: ($covers | any), via: "app-list" }
+  '
+}
+
+# ---- arg parsing ------------------------------------------------------------
+[ $# -ge 1 ] || die "no action; expected detect|detect-classify|trigger|poll|classify"
+case "$1" in -h|--help) sed -n '3,56p' "$0"; exit 0 ;; esac
+ACTION="$1"; shift
+
+REPO=""; PR=""; SINCE=""; INPUT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo)  REPO="${2:?--repo needs a value}";  shift 2 ;;
+    --pr)    PR="${2:?--pr needs a value}";       shift 2 ;;
+    --since) SINCE="${2:?--since needs a value}"; shift 2 ;;
+    --input) INPUT="${2:?--input needs a value}"; shift 2 ;;
+    -h|--help) sed -n '3,56p' "$0"; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+need jq
+
+case "$ACTION" in
+  classify)
+    if [ -n "$INPUT" ]; then cat "$INPUT"; else cat; fi | classify_json
+    ;;
+
+  detect-classify)
+    if [ -n "$INPUT" ]; then cat "$INPUT"; else cat; fi | detect_classify_json
+    ;;
+
+  detect)
+    need gh
+    [ -n "$REPO" ] || die "detect needs --repo"
+    owner="${REPO%%/*}"
+
+    # 1) authoritative: is the bot's GitHub App installed AND covering THIS repo?
+    #    Account-wide lists (user/orgs) are paginated and may include installations
+    #    scoped to *other* repos, so for each matching codex installation we resolve
+    #    whether it actually covers $REPO before trusting an affirmative verdict.
+    #    (The repo-scoped singular endpoint needs App-auth and 401s on a user token.)
+    for ep in "user/installations" "orgs/$owner/installations"; do
+      # --paginate streams every page; --jq '.installations[]' yields one install per line.
+      insts="$(gh api --paginate "$ep" --jq '.installations[]?' 2>/dev/null | jq -s '.' 2>/dev/null)" || continue
+      [ -n "$insts" ] && [ "$insts" != "[]" ] || continue
+
+      # For each codex installation, mark repoIncluded: "all" => true; "selected" =>
+      # check that installation's repository list (paginated) for $REPO.
+      enriched="$(printf '%s' "$insts" | jq -c --arg bot "$DEFAULT_BOT" \
+        '[ .[] | select((.app_slug // .slug // "") == $bot) ]')"
+      [ "$enriched" = "[]" ] && continue
+
+      resolved='[]'
+      while IFS= read -r inst; do
+        [ -n "$inst" ] || continue
+        sel="$(printf '%s' "$inst" | jq -r '.repository_selection // "all"')"
+        included=false
+        if [ "$sel" != "all" ]; then
+          id="$(printf '%s' "$inst" | jq -r '.id')"
+          # Capture the full list first: piping gh straight into `grep -q` lets grep close
+          # the pipe on first match, which (under `set -o pipefail`) surfaces gh's SIGPIPE
+          # 141 as a pipeline failure and would drop a real match. -F/-x/-i: match the
+          # owner/name literally and case-insensitively (repo names can contain "." etc.).
+          repolist="$(gh api --paginate "user/installations/$id/repositories" \
+                        --jq '.repositories[]?.full_name' 2>/dev/null || true)"
+          if printf '%s\n' "$repolist" | grep -Fqix "$REPO"; then
+            included=true
+          fi
+        fi
+        resolved="$(printf '%s' "$resolved" | jq -c --argjson inst "$inst" --argjson inc "$included" \
+          '. + [$inst + {repoIncluded:$inc}]')"
+      done < <(printf '%s' "$enriched" | jq -c '.[]')
+
+      # owner gate: an "all" install only covers this repo if its account is the repo owner;
+      # suspended installs are dropped inside detect_classify_json.
+      verdict="$(printf '%s' "$resolved" | jq -c --arg bot "$DEFAULT_BOT" --arg owner "$owner" \
+        '{installations:., botSlug:$bot, owner:$owner}' | detect_classify_json 2>/dev/null)" || continue
+      # Only trust an affirmative app-list verdict; a negative page might be incomplete
+      # for a different account scope, so fall through rather than declaring false here.
+      if [ "$(printf '%s' "$verdict" | jq -r '.available')" = "true" ]; then
+        echo "$verdict"; exit 0
+      fi
+    done
+
+    # 2) positive-only signal: has the connector ever commented in this repo?
+    comments="$(gh api "repos/$REPO/issues/comments?per_page=100" 2>/dev/null || echo '[]')"
+    hits="$(printf '%s' "$comments" | jq --arg bot "$DEFAULT_BOT" \
+              '[ .[]? | select((.user.login // "" | sub("\\[bot\\]$"; "")) == $bot) ] | length' \
+              2>/dev/null || echo 0)"
+    if [ "${hits:-0}" -gt 0 ] 2>/dev/null; then
+      echo '{"available":true,"via":"prior-activity"}'
+    else
+      # 3) can't prove it either way (e.g. fresh repo + user token) -> let the caller
+      #    trigger and decide empirically. NOT a false negative.
+      echo '{"available":"unknown","via":"undetermined"}'
+    fi
+    ;;
+
+  trigger)
+    need gh
+    [ -n "$REPO" ] || die "trigger needs --repo"
+    [ -n "$PR" ]   || die "trigger needs --pr"
+    gh pr comment "$PR" --repo "$REPO" --body "@codex review" >/dev/null
+    # trigger time from the server's clock (avoids local/remote skew)
+    gh api "repos/$REPO" --jq 'now | todate' 2>/dev/null || gh api /octocat --jq 'now | todate'
+    ;;
+
+  poll)
+    need gh
+    [ -n "$REPO" ] || die "poll needs --repo"
+    [ -n "$PR" ]   || die "poll needs --pr"
+    ic="$(gh api "repos/$REPO/issues/$PR/comments?per_page=100" 2>/dev/null || echo '[]')"
+    rv="$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100"   2>/dev/null || echo '[]')"
+    il="$(gh api "repos/$REPO/pulls/$PR/comments?per_page=100"  2>/dev/null || echo '[]')"
+    jq -n --argjson ic "$ic" --argjson rv "$rv" --argjson il "$il" --arg since "$SINCE" \
+      '{since:$since, issueComments:$ic, reviews:$rv, inlineComments:$il}' \
+      | classify_json
+    ;;
+
+  *) die "unknown action: $ACTION (expected detect|detect-classify|trigger|poll|classify)" ;;
+esac

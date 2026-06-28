@@ -1,0 +1,7 @@
+{
+  "botSlug": "chatgpt-codex-connector",
+  "installations": [
+    { "app_slug": "dependabot" },
+    { "slug": "github-actions" }
+  ]
+}
