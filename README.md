@@ -38,6 +38,12 @@ it — to the agent.
 skills/codex-review-loop/codex-review-loop.sh --help
 ```
 
+## Skills
+
+| Skill | Docs | What it does |
+|-------|------|--------------|
+| `codex-review-loop` | [docs](docs/skills/codex-review-loop.md) · [SKILL.md](skills/codex-review-loop/SKILL.md) | Drives the GitHub Codex (`@codex`) review loop on a PR until it reports no major issues. |
+
 ## Develop
 
 ```bash
